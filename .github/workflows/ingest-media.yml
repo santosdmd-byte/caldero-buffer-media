@@ -1,0 +1,66 @@
+name: ingest-media
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ingest/urls.json
+      - .github/workflows/ingest-media.yml
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download, verify, and commit media
+        env:
+          GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+          GIT_HTTP_LOW_SPEED_TIME: "600"
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config http.postBuffer 524288000
+          git config http.version HTTP/1.1
+          python3 << 'PY'
+          import hashlib, json, os, sys, urllib.request
+          from pathlib import Path
+          items = json.loads(Path("ingest/urls.json").read_text())
+          failed = []
+          for item in items:
+              dest = Path(item["dest"])
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              print(f"GET {item['url']} -> {dest}", flush=True)
+              req = urllib.request.Request(item["url"], headers={"User-Agent": "caldero-ingest/1"})
+              h = hashlib.md5()
+              n = 0
+              with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as f:
+                  ctype = resp.headers.get("Content-Type", "")
+                  while True:
+                      chunk = resp.read(1 << 20)
+                      if not chunk:
+                          break
+                      if n == 0 and chunk.lstrip()[:9].lower().startswith(b"<!doctype"):
+                          failed.append((item["dest"], f"HTML response type={ctype}"))
+                          break
+                      f.write(chunk)
+                      h.update(chunk)
+                      n += len(chunk)
+              else:
+                  digest = h.hexdigest()
+                  if n != item["bytes"] or digest != item["md5"]:
+                      failed.append((item["dest"], f"mismatch size={n} md5={digest} type={ctype}"))
+                  else:
+                      print(f"  OK {n} {digest} {ctype}", flush=True)
+          if failed:
+              for dest, err in failed:
+                  print(f"FAIL {dest}: {err}", file=sys.stderr)
+              sys.exit(1)
+          PY
+          git add dishfirst montage chefs ingest
+          if git diff --cached --quiet; then
+            echo "No media changes to commit"
+          else
+            git commit -m "Add Caldero Buffer media files (verified MD5)"
+            git push
+          fi
